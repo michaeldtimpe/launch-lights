@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "launch-lights"
+version = "0.2.0"
+description = "Turn a Novation Launchpad Pro (2015 / MK1) into a reactive 8x8 RGB display with an audio-driven show and web control panel."
+requires-python = ">=3.11"
+dependencies = [
+    "mido>=1.3",
+    "python-rtmidi>=1.5",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "click>=8.1",
+    "rich>=13",
+    "sounddevice>=0.4",
+    "websockets>=13",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+launch-lights = "launch_lights.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
