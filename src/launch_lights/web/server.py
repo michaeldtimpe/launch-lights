@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import http
 import json
 import logging
@@ -25,34 +26,18 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 STATE_PUSH_HZ = 10.0
 
 
-def _http(status: int, reason: str, body: bytes, ctype: str) -> Response:
+def _http(status: int, reason: str, body: bytes, ctype: str, *,
+          cache_control: str = "no-cache") -> Response:
     return Response(
         status_code=status,
         reason_phrase=reason,
         headers=Headers([
             ("Content-Type", ctype),
             ("Content-Length", str(len(body))),
-            ("Cache-Control", "no-cache"),
+            ("Cache-Control", cache_control),
         ]),
         body=body,
     )
-
-
-# Glyph hints for emoji button labels — pure UI flavor, falls back to text.
-EMOJI_GLYPHS: dict[str, str] = {
-    "heart": "♥", "smiley": "☺", "sad": "☹", "skull": "☠",
-    "music": "♪", "ghost": "👻", "fire": "🔥", "sun": "☀",
-    "mini_smiley": "·☺", "mini_sad": "·☹", "mini_skull": "·☠",
-    "mini_heart": "·♥", "mini_star": "·★",
-}
-
-# Glyph hints for shape buttons too where helpful.
-SHAPE_GLYPHS: dict[str, str] = {
-    "arrow_up": "↑", "arrow_down": "↓", "arrow_left": "←", "arrow_right": "→",
-    "check": "✓", "circle": "○", "diamond": "◇", "lightning": "⚡",
-    "plus": "+", "ring": "◯", "square": "□", "star": "★",
-    "triangle_up": "△", "triangle_down": "▽", "x": "✕",
-}
 
 
 PAGE_TMPL = r"""<!doctype html>
@@ -62,6 +47,7 @@ PAGE_TMPL = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>launch</title>
 <link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/gridstack.min.css">
 <script>
   (function () {
     try {
@@ -144,9 +130,29 @@ PAGE_TMPL = r"""<!doctype html>
 
   main {
     margin: 1.25rem 0 4rem; padding: 0 1.5rem;
-    display: grid; gap: 1rem;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   }
+  /* Gridstack wraps each card. Make the wrapper transparent and let the
+     card's own border/background show through. Override Gridstack defaults
+     that would otherwise paint a background on .grid-stack-item-content. */
+  .grid-stack { background: transparent; }
+  .grid-stack-item-content {
+    background: transparent !important;
+    inset: 0 !important;
+    overflow: visible !important;
+    display: flex; flex-direction: column;
+  }
+  .grid-stack-item-content > .card { flex: 1 1 auto; height: 100%; overflow: auto; }
+  /* Layout-edit affordances: show a dashed outline + grab cursor only when
+     the body is in .edit-mode. */
+  body.edit-mode .grid-stack-item-content > .card {
+    outline: 1px dashed var(--accent);
+    outline-offset: -2px;
+    cursor: grab;
+  }
+  body.edit-mode .grid-stack-item.ui-draggable-dragging > .grid-stack-item-content > .card { cursor: grabbing; }
+  /* Hide Gridstack resize handles when not in edit mode. */
+  body:not(.edit-mode) .ui-resizable-handle { display: none !important; }
+
   .card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.9rem 1rem; overflow: hidden;
@@ -156,25 +162,27 @@ PAGE_TMPL = r"""<!doctype html>
     display: flex; justify-content: flex-end; gap: 0.5rem;
     margin-top: 0.7rem; flex-wrap: wrap; align-items: center;
   }
-  .card.wide { grid-column: 1 / -1; }
 
   /* Live card: preview + stats + focus row */
   .card.live { display: grid; gap: 0.9rem 1.2rem;
                grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .card.live .focus-row { grid-column: 1 / -1; }
-  @media (max-width: 480px) { .card.live { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) { .card.live { grid-template-columns: 1fr; } }
   .preview {
-    width: 144px; height: 144px;
+    width: 240px; height: 240px;
     display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
-    gap: 2px; padding: 4px; background: #000; border-radius: 6px;
+    gap: 3px; padding: 6px; background: #000; border-radius: 6px;
   }
-  .preview > div { background: #050505; border-radius: 2px; }
+  .preview > div { background: #050505; border-radius: 3px; }
 
+  /* Single-column layout: label + bar/value pairs, max-width caps the
+     bar width on wide screens so the row doesn't stretch forever. */
   .live-grid {
-    display: grid; grid-template-columns: auto minmax(0, 1fr);
-    gap: 0.4rem 1rem;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 0.9rem; row-gap: 0.4rem;
     font-variant-numeric: tabular-nums; align-self: start;
-    min-width: 0;
+    min-width: 0; max-width: 360px;
   }
   .live-grid .l { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
   .beat-pill {
@@ -213,10 +221,17 @@ PAGE_TMPL = r"""<!doctype html>
   .choice-list.disabled label { opacity: 0.4; pointer-events: none; }
 
   .slider-row {
-    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.3rem 1rem;
-    align-items: center; margin-bottom: 0.6rem;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem 1rem;
+    align-items: center; margin-bottom: 0.4rem;
   }
   .slider-row:last-child { margin-bottom: 0; }
+
+  /* In-card horizontal divider — used to separate scene chips from
+     palette chips inside the scene card without an extra heading. */
+  .card-divider {
+    border: none; border-top: 1px solid var(--border);
+    margin: 0.7rem 0 0.5rem 0;
+  }
   .slider-row label { font-size: 13px; color: var(--muted); }
   .slider-row .val { font-variant-numeric: tabular-nums; color: var(--text); font-size: 13px; }
   .slider-row input[type=range] {
@@ -263,6 +278,23 @@ PAGE_TMPL = r"""<!doctype html>
     font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em;
     color: var(--muted); margin-bottom: 0.35rem;
   }
+
+  /* Scene chips: two independent visual states. .on = primary scene
+     (solid fill); .mutator-on = blended overlay (outline ring). A chip can
+     in principle hold both — primary fill wins, outline shows on top. */
+  #scene-list button[data-scene].on {
+    background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+  }
+  #scene-list button[data-scene].mutator-on {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-color: var(--accent);
+  }
+  #scene-list button[data-scene]:hover { border-color: var(--accent); color: var(--accent); }
+  #scene-list { gap: 0.35rem 0.4rem; }
+  /* Visually mark blend mode so it's obvious clicks now toggle mutators. */
+  .scene-actions button.toggle.on {
+    background: var(--accent); color: var(--bg); border-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -273,12 +305,17 @@ PAGE_TMPL = r"""<!doctype html>
   </div>
   <div class="right">
     <button id="blackout" class="danger" title="Clear all output">clear</button>
+    <button id="layout-edit" class="action" type="button" title="Drag/resize cards">edit layout</button>
+    <button id="layout-export" class="action" type="button" title="Copy layout JSON to clipboard" style="display:none">export</button>
+    <button id="layout-reset" class="action" type="button" title="Reset to default layout" style="display:none">reset</button>
     <div class="status" id="status"><span class="dot"></span><span id="status-text">offline</span></div>
     <button id="theme-toggle" class="theme-toggle" type="button">theme</button>
   </div>
 </header>
 
-<main>
+<main class="grid-stack">
+  <div class="grid-stack-item" gs-id="live" gs-x="0" gs-y="0" gs-w="5" gs-h="6">
+    <div class="grid-stack-item-content">
   <section class="card live wide">
     <div>
       <div id="preview" class="preview"></div>
@@ -305,15 +342,10 @@ PAGE_TMPL = r"""<!doctype html>
       </div>
     </div>
   </section>
+    </div></div>
 
-  <section class="card" data-card="palette">
-    <div class="choice-list" id="palette-list">
-      <button data-palette="">none</button>
-      {{PALETTE_OPTIONS}}
-      <button class="reset" data-reset="palette" style="margin-left:auto">reset</button>
-    </div>
-  </section>
-
+  <div class="grid-stack-item" gs-id="color" gs-x="0" gs-y="6" gs-w="4" gs-h="5">
+    <div class="grid-stack-item-content">
   <section class="card" data-card="color">
     <div class="slider-row">
       <label for="hue">hue rotate</label><span class="val" id="hue-val">0°</span>
@@ -337,7 +369,10 @@ PAGE_TMPL = r"""<!doctype html>
       <button class="reset" data-reset="color" style="margin-left:auto">reset</button>
     </div>
   </section>
+    </div></div>
 
+  <div class="grid-stack-item" gs-id="motion" gs-x="4" gs-y="6" gs-w="4" gs-h="5">
+    <div class="grid-stack-item-content">
   <section class="card" data-card="motion">
     <div class="slider-row">
       <label for="trail">trails</label><span class="val" id="trail-val">0.00</span>
@@ -357,7 +392,10 @@ PAGE_TMPL = r"""<!doctype html>
       <button class="reset" data-reset="motion" style="margin-left:auto">reset</button>
     </div>
   </section>
+    </div></div>
 
+  <div class="grid-stack-item" gs-id="audio" gs-x="8" gs-y="8" gs-w="4" gs-h="3">
+    <div class="grid-stack-item-content">
   <section class="card" data-card="audio">
     <div class="slider-row">
       <label for="sensitivity">sensitivity</label><span class="val" id="sensitivity-val">1.00</span>
@@ -371,41 +409,48 @@ PAGE_TMPL = r"""<!doctype html>
       <button class="reset" data-reset="audio">reset</button>
     </div>
   </section>
+    </div></div>
 
+  <div class="grid-stack-item" gs-id="tempo" gs-x="8" gs-y="6" gs-w="4" gs-h="2">
+    <div class="grid-stack-item-content">
   <section class="card" data-card="tempo">
     <div class="slider-row">
       <label for="tempo">bpm</label><span class="val" id="tempo-val">auto</span>
       <input id="tempo" type="range" min="40" max="200" step="1" value="120" disabled>
     </div>
-    <div class="tempo-row" style="margin-bottom: 0.6rem">
-      <label class="auto"><input id="tempo-auto" type="checkbox" checked>auto-detect</label>
-    </div>
-    <div class="group-label">beat multiplier</div>
     <div class="choice-list" id="beat-mul-list">
+      <label class="auto"><input id="tempo-auto" type="checkbox" checked>auto</label>
       <label data-mul="0.5"><input type="radio" name="bmul" value="0.5">0.5×</label>
       <label data-mul="1.0"><input type="radio" name="bmul" value="1.0" checked>1×</label>
       <label data-mul="2.0"><input type="radio" name="bmul" value="2.0">2×</label>
       <button class="reset" data-reset="tempo" style="margin-left:auto">reset</button>
     </div>
   </section>
+    </div></div>
 
+  <div class="grid-stack-item" gs-id="scene" gs-x="5" gs-y="0" gs-w="7" gs-h="6">
+    <div class="grid-stack-item-content">
   <section class="card wide" data-card="scene">
     <div class="choice-list" id="scene-list">
       {{SCENE_OPTIONS}}
+    </div>
+    <div class="choice-list scene-actions" style="margin-top: 0.4rem">
       <button class="action" id="scene-auto" style="margin-left:auto">auto</button>
       <button class="action" id="scene-none">none</button>
+      <button class="toggle" id="blend-toggle" title="Toggle multi-select on scene chips">blend</button>
       <button class="reset" data-reset="scene">reset</button>
     </div>
-  </section>
-
-  <section class="card wide" data-card="mutator">
-    <div class="choice-list" id="mutator-list">
-      {{MUTATOR_OPTIONS}}
-      <button class="action" id="mutator-none" style="margin-left:auto">none</button>
-      <button class="reset" data-reset="mutator">reset</button>
+    <hr class="card-divider">
+    <div class="choice-list" id="palette-list">
+      {{PALETTE_OPTIONS}}
+      <button data-palette="" style="margin-left:auto">none</button>
+      <button class="reset" data-reset="palette">reset</button>
     </div>
   </section>
+    </div></div>
 
+  <div class="grid-stack-item" gs-id="text" gs-x="0" gs-y="11" gs-w="6" gs-h="2">
+    <div class="grid-stack-item-content">
   <section class="card wide" data-card="text">
     <input id="text-input" type="text" maxlength="200" value="LAUNCH LIGHTS">
     <div class="text-row-inline">
@@ -426,21 +471,35 @@ PAGE_TMPL = r"""<!doctype html>
       <button class="reset" data-reset="text" style="margin-left:auto">reset</button>
     </div>
   </section>
+    </div></div>
 
-  <section class="card wide" data-card="shape">
-    <div class="choice-list" id="shape-list">
-      {{SHAPE_OPTIONS}}
-    </div>
-    <div class="choice-list" id="emoji-list" style="margin-top: 0.5rem">
-      {{EMOJI_OPTIONS}}
-    </div>
-    <div class="card-footer">
-      <button class="reset" data-reset="shape">reset</button>
+  <div class="grid-stack-item" gs-id="video" gs-x="6" gs-y="11" gs-w="6" gs-h="2">
+    <div class="grid-stack-item-content">
+  <section class="card wide" data-card="video">
+    <div class="group-label">video file</div>
+    <input id="video-path" type="text" placeholder="/path/to/video.mp4">
+    <div class="text-row-inline">
+      <div class="choice-list" id="video-fit-list">
+        <label data-fit="crop"><input type="radio" name="vfit" value="crop" checked>crop</label>
+        <label data-fit="letterbox"><input type="radio" name="vfit" value="letterbox">letterbox</label>
+        <label data-fit="stretch"><input type="radio" name="vfit" value="stretch">stretch</label>
+      </div>
+      <span class="val" id="video-status" style="margin-left:auto">no file loaded</span>
+      <button class="action" id="video-load">load</button>
+      <button class="action" id="video-stop">stop</button>
     </div>
   </section>
+    </div></div>
+
 </main>
 
 <script>
+// Bumped automatically when the rendered HTML changes. The WS handler
+// compares it to the page_version in every server snapshot — on mismatch
+// (e.g. server got restarted with new source) we force a reload so this
+// tab is never stuck on a stale page.
+const PAGE_VERSION = "__PAGE_VERSION__";
+
 (function () {
   const root = document.documentElement;
   const btn = document.getElementById("theme-toggle");
@@ -504,10 +563,28 @@ function setVU(id, value, scale) {
   el.style.background = intensityColor(t);
 }
 
+function videoBasename(p) {
+  if (!p) return "";
+  const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return slash >= 0 ? p.slice(slash + 1) : p;
+}
+
 ws.on((msg) => {
   if (msg.type !== "state") return;
+  // Stale-tab guard: if the server is now serving a different HTML than
+  // what we loaded, drop everything and reload.
+  if (msg.page_version && msg.page_version !== PAGE_VERSION) {
+    location.reload();
+    return;
+  }
   document.getElementById("scene-name").textContent = msg.scene || "—";
   document.getElementById("source-name").textContent = msg.source || "—";
+  if (msg.video) {
+    const status = document.getElementById("video-status");
+    status.textContent = msg.video.loaded
+      ? "playing: " + videoBasename(msg.video.path || "")
+      : "no file loaded";
+  }
   document.getElementById("bpm").textContent = msg.bpm ? msg.bpm.toFixed(0) : "—";
   document.getElementById("conf").textContent = msg.beat_confidence != null
     ? (msg.beat_confidence * 100).toFixed(0) + "%" : "—";
@@ -550,28 +627,53 @@ bindRadio("beat-mul-list", "beat_multiplier", v => parseFloat(v));
 bindRadio("font-list",     "text_font", v => v);
 bindRadio("dir-list",      "text_dir",  v => v);
 
-// Scene list: radio for the per-scene picks. auto/none handled by buttons.
-(function () {
-  const list = document.getElementById("scene-list");
-  list.querySelectorAll("label").forEach(l => {
-    l.addEventListener("click", () => {
-      list.querySelectorAll("label").forEach(x => x.classList.remove("on"));
-      l.classList.add("on");
-      const input = l.querySelector("input");
-      input.checked = true;
-      ws.send({ type: "scene", value: input.value });
-    });
+// Unified scene chips: click sets primary in default mode, toggles
+// mutator membership in blend mode. Primary highlight = .on; mutator
+// outline = .mutator-on. Both states are independent.
+let sceneBlendMode = false;
+let scenePrimary = null;
+const sceneMutators = new Set();
+
+function renderSceneChips() {
+  document.querySelectorAll("#scene-list button[data-scene]").forEach(b => {
+    b.classList.toggle("on", b.dataset.scene === scenePrimary);
+    b.classList.toggle("mutator-on", sceneMutators.has(b.dataset.scene));
   });
-})();
-document.getElementById("scene-auto").addEventListener("click", () => {
-  document.querySelectorAll("#scene-list label").forEach(l => l.classList.remove("on"));
-  document.querySelectorAll("#scene-list input").forEach(i => { i.checked = false; });
-  ws.send({ type: "scene", value: null });
+  const blendBtn = document.getElementById("blend-toggle");
+  blendBtn.classList.toggle("on", sceneBlendMode);
+  blendBtn.textContent = sceneBlendMode ? "blend ✓" : "blend";
+}
+
+document.querySelectorAll("#scene-list button[data-scene]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const name = btn.dataset.scene;
+    if (sceneBlendMode) {
+      if (sceneMutators.has(name)) sceneMutators.delete(name);
+      else sceneMutators.add(name);
+      ws.send({ type: "mutator", value: Array.from(sceneMutators) });
+    } else {
+      scenePrimary = name;
+      ws.send({ type: "scene", value: name });
+    }
+    renderSceneChips();
+  });
 });
+
+document.getElementById("blend-toggle").addEventListener("click", () => {
+  sceneBlendMode = !sceneBlendMode;
+  renderSceneChips();
+});
+
+document.getElementById("scene-auto").addEventListener("click", () => {
+  scenePrimary = null;
+  ws.send({ type: "scene", value: null });
+  renderSceneChips();
+});
+
 document.getElementById("scene-none").addEventListener("click", () => {
-  document.querySelectorAll("#scene-list label").forEach(l => l.classList.remove("on"));
-  document.querySelectorAll("#scene-list input").forEach(i => { i.checked = false; });
+  scenePrimary = null;
   ws.send({ type: "scene", value: "none" });
+  renderSceneChips();
 });
 
 // Palette
@@ -587,46 +689,21 @@ document.getElementById("scene-none").addEventListener("click", () => {
   list.querySelector('button[data-palette=""]').classList.add("on");
 })();
 
-// Shape + Emoji: click → set bitmap and lock scene to "shape"
-function bindBitmapList(listId) {
-  const list = document.getElementById(listId);
-  if (!list) return;
-  list.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      // Single global "selected bitmap" — clear other bitmap-list buttons too
-      document.querySelectorAll("#shape-list button, #emoji-list button")
-        .forEach(b => b.classList.remove("on"));
-      btn.classList.add("on");
-      ws.send({ type: "shape", value: btn.dataset.shape });
-      ws.send({ type: "scene", value: "shape" });
-      document.querySelectorAll("#scene-list label").forEach(l => l.classList.remove("on"));
-      const radio = document.querySelector('#scene-list input[value="shape"]');
-      if (radio) { radio.checked = true; radio.parentElement.classList.add("on"); }
-    });
-  });
-}
-bindBitmapList("shape-list");
-bindBitmapList("emoji-list");
 
-// Mutator
+// Video file: text path + fit + load/stop
 (function () {
-  const list = document.getElementById("mutator-list");
-  function emit() {
-    const names = Array.from(list.querySelectorAll("input:checked")).map(i => i.value);
-    ws.send({ type: "mutator", value: names });
-  }
-  list.querySelectorAll("label").forEach(l => {
-    l.addEventListener("click", () => {
-      const input = l.querySelector("input");
-      setTimeout(() => { l.classList.toggle("on", input.checked); emit(); }, 0);
-    });
+  const path = document.getElementById("video-path");
+  const status = document.getElementById("video-status");
+  document.getElementById("video-load").addEventListener("click", () => {
+    const p = path.value.trim();
+    if (!p) return;
+    ws.send({ type: "video", action: "load", path: p });
   });
-  document.getElementById("mutator-none").addEventListener("click", () => {
-    list.querySelectorAll("input").forEach(i => { i.checked = false; });
-    list.querySelectorAll("label").forEach(l => l.classList.remove("on"));
-    emit();
+  document.getElementById("video-stop").addEventListener("click", () => {
+    ws.send({ type: "video", action: "stop" });
   });
 })();
+bindRadio("video-fit-list", "video_fit", v => v);
 
 function bindSlider(id, sendKey, fmt) {
   const el = document.getElementById(id);
@@ -752,15 +829,12 @@ const RESETS = {
     setRadioDefault("beat-mul-list", "1.0", "beat_multiplier", v => parseFloat(v));
   },
   scene: () => {
-    document.querySelectorAll("#scene-list label").forEach(l => l.classList.remove("on"));
-    document.querySelectorAll("#scene-list input").forEach(i => { i.checked = false; });
-    ws.send({ type: "scene", value: null });  // auto
-  },
-  mutator: () => {
-    const list = document.getElementById("mutator-list");
-    list.querySelectorAll("input").forEach(i => { i.checked = false; });
-    list.querySelectorAll("label").forEach(l => l.classList.remove("on"));
+    scenePrimary = null;
+    sceneMutators.clear();
+    sceneBlendMode = false;
+    ws.send({ type: "scene", value: null });
     ws.send({ type: "mutator", value: [] });
+    renderSceneChips();
   },
   text: () => {
     document.getElementById("text-input").value = "LAUNCH LIGHTS";
@@ -771,13 +845,6 @@ const RESETS = {
     document.getElementById("text-speed-val").textContent = 8;
     ws.send({ type: "text_speed", value: 8 });
   },
-  shape: () => {
-    document.querySelectorAll("#shape-list button, #emoji-list button")
-      .forEach(b => b.classList.remove("on"));
-    const heart = document.querySelector('#emoji-list button[data-shape="heart"]');
-    if (heart) heart.classList.add("on");
-    ws.send({ type: "shape", value: "heart" });
-  },
 };
 document.querySelectorAll("button.reset").forEach(b => {
   b.addEventListener("click", () => {
@@ -785,43 +852,130 @@ document.querySelectorAll("button.reset").forEach(b => {
     if (RESETS[card]) RESETS[card]();
   });
 });
+
+// ---------- Gridstack layout editor ----------
+// Loaded after the page DOM exists so the items are pickable.
+</script>
+<script src="/static/gridstack-all.js"></script>
+<script>
+(function () {
+  const grid = GridStack.init({
+    column: 12,
+    cellHeight: 60,
+    margin: 6,
+    float: true,
+    disableDrag: true,
+    disableResize: true,
+    handle: ".grid-stack-item-content",  // drag from anywhere on the card
+    columnOpts: {
+      breakpoints: [
+        { w: 600, c: 1 },
+        { w: 900, c: 6 },
+      ],
+    },
+  });
+
+  // Per-version layout key — when the rendered HTML changes (page_version
+  // bumps), the key changes, so the previous saved layout no longer applies
+  // and the user sees fresh defaults. Old keys get cleaned up so they don't
+  // accumulate in localStorage.
+  const LAYOUT_KEY = "launch-layout-" + PAGE_VERSION;
+  try {
+    const stale = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && (k === "launch-layout" ||
+                (k.startsWith("launch-layout-") && k !== LAYOUT_KEY))) {
+        stale.push(k);
+      }
+    }
+    stale.forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+
+  // Restore saved layout for this version (positions only — never content).
+  try {
+    const saved = localStorage.getItem(LAYOUT_KEY);
+    if (saved) grid.load(JSON.parse(saved));
+  } catch (e) { console.warn("layout load failed", e); }
+
+  // Auto-save on any drag/resize/add/remove.
+  grid.on("change added removed", () => {
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(grid.save(false))); }
+    catch (e) { /* full localStorage, probably */ }
+  });
+
+  // Edit mode toggle: enables drag+resize and reveals export/reset.
+  const editBtn = document.getElementById("layout-edit");
+  const exportBtn = document.getElementById("layout-export");
+  const resetBtn = document.getElementById("layout-reset");
+  let editing = false;
+  function setEditing(on) {
+    editing = on;
+    document.body.classList.toggle("edit-mode", on);
+    if (on) { grid.enable(); } else { grid.disable(); }
+    editBtn.classList.toggle("on", on);
+    editBtn.textContent = on ? "done editing" : "edit layout";
+    exportBtn.style.display = on ? "" : "none";
+    resetBtn.style.display = on ? "" : "none";
+  }
+  editBtn.addEventListener("click", () => setEditing(!editing));
+
+  // Export: copy current layout JSON to clipboard for handoff.
+  exportBtn.addEventListener("click", async () => {
+    const config = grid.save(false);
+    const json = JSON.stringify(config, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      exportBtn.textContent = "copied!";
+      setTimeout(() => { exportBtn.textContent = "export"; }, 1200);
+    } catch (e) {
+      // Fallback for non-secure contexts: open a prompt
+      window.prompt("Copy layout JSON:", json);
+    }
+  });
+
+  // Reset: clear our layout entry (any version) and reload to baked defaults.
+  resetBtn.addEventListener("click", () => {
+    if (!confirm("Reset layout to defaults?")) return;
+    try {
+      const stale = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k === "launch-layout" || k.startsWith("launch-layout-"))) {
+          stale.push(k);
+        }
+      }
+      stale.forEach(k => localStorage.removeItem(k));
+    } catch (e) {}
+    location.reload();
+  });
+})();
 </script>
 </body>
 </html>"""
 
 
-def _render_page(viz_names: list[str], palette_names: list[str],
-                 shape_names: list[str], emoji_names: list[str]) -> str:
+def _render_page(viz_names: list[str], palette_names: list[str]) -> str:
+    # Scene chips are buttons (not radios) so they can hold two independent
+    # visual states: .on for the primary scene, .mutator-on for blended
+    # overlays. The blend toggle in the UI flips between which state a click
+    # affects.
     scene_opts = "\n      ".join(
-        f'<label data-scene="{n}"><input type="radio" name="scene" value="{n}">{n}</label>'
-        for n in viz_names
-    )
-    mutator_opts = "\n      ".join(
-        f'<label data-mutator="{n}"><input type="checkbox" value="{n}">{n}</label>'
-        for n in viz_names
+        f'<button data-scene="{n}">{n}</button>' for n in viz_names
     )
     palette_opts = "\n      ".join(
         f'<button data-palette="{n}">{n}</button>' for n in palette_names
     )
 
-    def _btn(n: str, glyphs: dict) -> str:
-        glyph = glyphs.get(n, "")
-        label = f"{glyph} {n}" if glyph else n
-        return f'<button data-shape="{n}">{label}</button>'
-
-    shape_opts = "\n      ".join(_btn(n, SHAPE_GLYPHS) for n in shape_names)
-    emoji_opts = "\n      ".join(_btn(n, EMOJI_GLYPHS) for n in emoji_names)
-
     return (PAGE_TMPL
             .replace("{{SCENE_OPTIONS}}", scene_opts)
-            .replace("{{MUTATOR_OPTIONS}}", mutator_opts)
-            .replace("{{PALETTE_OPTIONS}}", palette_opts)
-            .replace("{{SHAPE_OPTIONS}}", shape_opts)
-            .replace("{{EMOJI_OPTIONS}}", emoji_opts))
+            .replace("{{PALETTE_OPTIONS}}", palette_opts))
 
 
-# Hidden from the scene picker (Clear button handles blackout).
-HIDDEN_FROM_SCENE_PICKER = {"blackout"}
+# Hidden from the scene picker. "blackout" has the Clear button instead.
+# "shape" is hidden because the shape-picker UI was removed and the scene
+# isn't usable without a way to pick which bitmap to show.
+HIDDEN_FROM_SCENE_PICKER = {"blackout", "shape"}
 
 
 class ControlServer:
@@ -833,15 +987,24 @@ class ControlServer:
         self._source_label = source_label
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        from launch_lights.video.audio_show import ALL_VIZES, PALETTES, SHAPES, EMOJIS
+        from launch_lights.video.audio_show import ALL_VIZES, PALETTES
         self._all_viz_names = [c.name for c in ALL_VIZES]
         picker = sorted(c.name for c in ALL_VIZES if c.name not in HIDDEN_FROM_SCENE_PICKER)
         palettes = sorted(PALETTES.keys())
-        shapes = sorted(SHAPES.keys())
-        emojis = sorted(EMOJIS.keys())
-        self._page = _render_page(picker, palettes, shapes, emojis).encode("utf-8")
+        rendered = _render_page(picker, palettes).encode("utf-8")
+        # Hash content (before version substitution) so the bytes embedded as
+        # "this build's version" stay deterministic across restarts that
+        # don't actually change the page.
+        self._page_version = hashlib.sha256(rendered).hexdigest()[:12]
+        self._page = rendered.replace(
+            b"__PAGE_VERSION__", self._page_version.encode("ascii")
+        )
         with open(os.path.join(STATIC_DIR, "InterVariable.ttf"), "rb") as f:
             self._font = f.read()
+        with open(os.path.join(STATIC_DIR, "gridstack-all.js"), "rb") as f:
+            self._gridstack_js = f.read()
+        with open(os.path.join(STATIC_DIR, "gridstack.min.css"), "rb") as f:
+            self._gridstack_css = f.read()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="control-server", daemon=True)
@@ -856,9 +1019,16 @@ class ControlServer:
         if path == "/ws":
             return None
         if path == "/":
-            return _http(200, "OK", self._page, "text/html; charset=utf-8")
+            # no-store: the page embeds a version string, so caching it
+            # would defeat the stale-tab reload check.
+            return _http(200, "OK", self._page, "text/html; charset=utf-8",
+                         cache_control="no-store")
         if path == "/static/InterVariable.ttf":
             return _http(200, "OK", self._font, "font/ttf")
+        if path == "/static/gridstack-all.js":
+            return _http(200, "OK", self._gridstack_js, "application/javascript")
+        if path == "/static/gridstack.min.css":
+            return _http(200, "OK", self._gridstack_css, "text/css")
         return _http(404, "Not Found", b"not found\n", "text/plain")
 
     async def _ws_handler(self, conn: ServerConnection) -> None:
@@ -903,6 +1073,8 @@ class ControlServer:
             "beat_confidence": float(getattr(a, "_last_beat_confidence", 0.0)),
             "spectral_flux": float(getattr(a, "_last_flux", 0.0)),
             "grid": flat,
+            "video": a.video_status() if hasattr(a, "video_status") else None,
+            "page_version": self._page_version,
         }
 
     def _apply(self, msg: dict) -> None:
@@ -960,6 +1132,32 @@ class ControlServer:
             a.show.set_text(direction=v)
         elif kind == "shape" and isinstance(v, str):
             a.show.set_shape(v)
+        elif kind == "video":
+            action = msg.get("action")
+            if action == "stop":
+                a.set_video_source(None)
+            elif action == "load":
+                path = msg.get("path")
+                if isinstance(path, str) and path.strip():
+                    self._load_video(path.strip())
+        elif kind == "video_fit" and isinstance(v, str):
+            a.set_video_fit(v)
+
+    def _load_video(self, path: str) -> None:
+        """Open a FileSource on the asyncio thread and hand it to the audio
+        source. Path validation: must exist on disk; we don't accept URLs
+        or schemes to keep the surface area small."""
+        if not os.path.isfile(path):
+            log.warning("video load: not a file: %s", path)
+            return
+        try:
+            from launch_lights.video.source import FileSource
+            src = FileSource(path)
+        except Exception as e:
+            log.warning("video load: failed to open %s: %s", path, e)
+            return
+        self._audio.set_video_source(src, path=path)
+        log.info("video loaded: %s", path)
 
     def _run(self) -> None:
         async def main():

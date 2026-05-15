@@ -73,10 +73,11 @@ and 0–2 random effects layered.
 
 - `text` — scrolling banner, set from the panel's text card
   (5×7 / 3×5 fonts, left/right scroll, speed slider).
-- `shape` — single static bitmap pulse, picked from the shapes & emojis
-  card. Includes 5×5 mini variants.
 - `blackout` — empty grid (used internally by the `clear` button and
   scene = `none`).
+- `shape` — single static bitmap pulse. The shape/emoji **picker UI was
+  removed** from the dashboard, but the underlying scene and its
+  `shape` WebSocket message still work for programmatic clients.
 
 ## Effect pipeline (fixed order)
 
@@ -138,9 +139,17 @@ serves three things:
   "rms": 0.42, "bass": 0.51, "treble": 0.12,
   "bpm": 124.0, "is_beat": false, "beat_count": 87,
   "beat_confidence": 0.86, "spectral_flux": 0.034,
-  "grid": [r0,g0,b0, r1,g1,b1, ...]   // 192 ints, 8×8×3, channels 0..63
+  "grid": [r0,g0,b0, r1,g1,b1, ...],  // 192 ints, 8×8×3, channels 0..63
+  "video": { "loaded": false, "path": null, "fit": "crop" },
+  "page_version": "abc123def456"  // changes when the HTML changes
 }
 ```
+
+The client uses `page_version` for the stale-tab guard: if the value
+differs from the `PAGE_VERSION` constant embedded in the HTML at
+render time, the client calls `location.reload()`. The layout
+`localStorage` key includes `page_version` so a server upgrade also
+invalidates any saved layout from the previous build.
 
 **Client → server** (any JSON message accepted; unknown fields
 ignored):
@@ -169,7 +178,9 @@ ignored):
 | `text_font`         | `5x7 / 3x5`                              | font for scrolling text                  |
 | `text_speed`        | 1..40 (pixels/sec)                       | scroll speed                             |
 | `text_dir`          | `left / right`                           | scroll direction                         |
-| `shape`             | shape/emoji name                         | bitmap to display in the `shape` scene   |
+| `shape`             | shape/emoji name                         | bitmap to display in the `shape` scene (no panel UI; programmatic only) |
+| `video`             | `{ action: "load", path: str }` or `{ action: "stop" }` | mount a server-side `FileSource` and route its frames through `paint_passthrough` |
+| `video_fit`         | `crop / letterbox / stretch`             | fit mode applied to the loaded video before downsampling |
 
 ## Architecture notes
 

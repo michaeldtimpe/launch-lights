@@ -97,10 +97,12 @@ Available when `--control-port` is set with `--source audio` or
 - **audio analysis stats**: scene name, beat counter, BPM, beat
   confidence, and intensity-coloured VU meters for RMS, bass, treble,
   and spectral flux
-- **scene** picker — `auto` (rotates every 20-40 s), `none`, or any of
-  the 20 visualisations
-- **mutator** multi-select — blends extra scenes on top of the primary
-- **palette** — 16 palettes, swap them live
+- **scene + palette** card — `auto` (rotates every 20-40 s), `none`, or
+  any of the 20 visualisations. A **blend** toggle next to those buttons
+  changes click behaviour: with blend off a click sets the primary scene
+  (solid highlight); with blend on a click toggles a scene as a mutator
+  overlay (outline highlight). Below the chips, a divider, then the 16
+  palettes — click any to remap output by brightness, `none` to clear.
 - **color & tone** — hue rotate, contrast (sigmoid), gamma, brightness,
   invert/complementary toggles
 - **motion** — trail decay, bar decay, mirror modes (off / h / v / quad /
@@ -110,8 +112,16 @@ Available when `--control-port` is set with `--source audio` or
 - **focus** — bias the analysis toward bass, melody, or harmony bands
 - **scrolling text** — type a string, pick 5×7 or 3×5 font, scroll
   direction, speed
-- **shapes & emojis** — bitmap library (arrows, geometric icons, hearts,
-  faces, skulls, fire, etc.) including 5×5 mini variants
+- **video file** — paste an absolute path to a video, pick a fit mode
+  (crop / letterbox / stretch), and click **load**; the video is routed
+  through the same effect stack as `--source webcam-show`, so palette /
+  hue / mirror / contrast all apply live during playback. **stop** clears
+  it and the audio show resumes.
+- **edit layout** (top-right header) toggles a drag-and-resize mode
+  (Gridstack-driven). Cards become draggable on a 12-column grid; the
+  layout auto-saves to `localStorage` per page version. **export**
+  copies the current layout JSON to your clipboard; **reset** wipes the
+  saved layout and reloads to baked-in defaults.
 - a top-bar **`clear`** kill switch and a **`reset`** on every adjustable
   card
 

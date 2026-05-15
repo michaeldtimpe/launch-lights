@@ -4,6 +4,11 @@ The audio thread fills a 1024-sample buffer (`_latest`); `read_frame` pulls
 it, computes an 8-band FFT spectrum, peak-decayed band magnitudes, an RMS
 loudness, and a transient flag (beat detection on bass). Those analyses go
 into a `MusicState` which the `Show` director turns into a Frame.
+
+An optional video source can be plugged in at runtime via
+``set_video_source`` — when set, ``read_frame`` routes a video frame
+through the same passthrough pipeline ``--source webcam-show`` uses,
+instead of painting the scene library.
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import numpy as np
 
 from launch_lights.engine.frame import Cell, Frame, OFF, RGB
 from launch_lights.video.audio_show import MusicState, Show, N_BANDS
+from launch_lights.video.source import VideoSource
 
 
 SAMPLE_RATE = 44100
@@ -81,6 +87,17 @@ class AudioSource:
         self._intensity = 1.0
         self._focus: Optional[str] = None  # "bass" | "melody" | "harmony" | None
         self._tempo_override: Optional[float] = None  # BPM or None for auto
+
+        # Optional video source (set at runtime via set_video_source). When
+        # non-None, read_frame routes the video frame through the show's
+        # passthrough pipeline instead of painting scenes.
+        self._video_lock = threading.Lock()
+        self._video_source: Optional[VideoSource] = None
+        self._video_path: Optional[str] = None
+        self._video_fit: str = "crop"
+        self._video_gamma: float = 2.2
+        self._video_brightness: float = 1.0
+        self._video_last_good: Optional[np.ndarray] = None
 
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, blocksize=BLOCK_SIZE,
@@ -214,6 +231,12 @@ class AudioSource:
 
     def read_frame(self, elapsed: float) -> Frame:
         state = self._analyze(elapsed)
+        # Video override: if a video source is loaded, paint the video frame
+        # through the show's passthrough pipeline instead of generating a
+        # scene from the audio state.
+        video_frame = self._read_video_passthrough(state)
+        if video_frame is not None:
+            return video_frame
         cells: dict[Cell, RGB] = {(r, c): OFF for r in range(8) for c in range(8)}
         cells.update(self._show.paint(state))
         # Cache the rendered grid for the panel preview.
@@ -223,6 +246,51 @@ class AudioSource:
             grid[r, c, 1] = rgb.g
             grid[r, c, 2] = rgb.b
         return Frame(cells=cells)
+
+    def _read_video_passthrough(self, state: MusicState) -> Optional[Frame]:
+        """If a video source is set, decode one frame and route it through
+        the show's passthrough pipeline. Returns None if no video source is
+        loaded (caller falls back to scene painting)."""
+        with self._video_lock:
+            src = self._video_source
+            if src is None:
+                return None
+            bgr = src.read()
+        if bgr is None:
+            bgr = self._video_last_good
+            if bgr is None:
+                return None
+        else:
+            self._video_last_good = bgr
+
+        # Import inside the hot path so the cv2-pulling pipeline module
+        # isn't paid by users who never load a video.
+        from launch_lights.video.pipeline import (
+            apply_gamma_brightness,
+            bgr_to_rgb,
+            fit_and_downsample,
+            quantize_to_6bit,
+        )
+
+        rgb = bgr_to_rgb(bgr)
+        small = fit_and_downsample(rgb, self._video_fit)
+        small = apply_gamma_brightness(small, self._video_gamma, self._video_brightness)
+        small_6 = quantize_to_6bit(small)
+        cells_in: dict[Cell, RGB] = {
+            (r, c): RGB(int(small_6[r, c, 0]), int(small_6[r, c, 1]), int(small_6[r, c, 2]))
+            for r in range(8) for c in range(8)
+        }
+        cells_out = self._show.paint_passthrough(cells_in, state)
+        # Cache for preview.
+        grid = self._last_frame_rgb
+        grid[:] = 0
+        for (r, c), rgb_v in cells_out.items():
+            grid[r, c, 0] = rgb_v.r
+            grid[r, c, 1] = rgb_v.g
+            grid[r, c, 2] = rgb_v.b
+        full: dict[Cell, RGB] = {(r, c): OFF for r in range(8) for c in range(8)}
+        full.update(cells_out)
+        return Frame(cells=full)
 
     def latest_frame_grid(self) -> np.ndarray:
         """Returns the most recent (8,8,3) framebuffer for preview."""
@@ -249,6 +317,32 @@ class AudioSource:
     def set_decay_rate(self, value: float) -> None:
         self._bar_decay = max(0.1, min(0.99, float(value)))
 
+    def set_video_source(self, source: Optional[VideoSource], path: Optional[str] = None) -> None:
+        """Replace the runtime video source. Pass None to stop. Closes the
+        previous source. Thread-safe — callers may invoke from the WebSocket
+        thread while the render thread is reading frames."""
+        with self._video_lock:
+            old = self._video_source
+            self._video_source = source
+            self._video_path = path if source is not None else None
+            self._video_last_good = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+
+    def set_video_fit(self, fit: str) -> None:
+        if fit in ("crop", "letterbox", "stretch"):
+            self._video_fit = fit
+
+    def video_status(self) -> dict:
+        return {
+            "loaded": self._video_source is not None,
+            "path": self._video_path,
+            "fit": self._video_fit,
+        }
+
     def snapshot_state(self) -> dict:
         return {
             "gain": self._gain,
@@ -266,3 +360,5 @@ class AudioSource:
             self._stream.close()
         except Exception:
             pass
+        # Release any video source we loaded at runtime.
+        self.set_video_source(None)
