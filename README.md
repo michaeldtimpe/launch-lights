@@ -1,7 +1,8 @@
 # launch-lights
 
-Turn a **Novation Launchpad Pro (2015 / MK1)** into a reactive 8×8 RGB
-display. Drives the LP Pro at 30 fps over SysEx with sources that range
+Turn a **Novation Launchpad Pro** into a reactive 8×8 RGB display.
+Supports the **2015 / MK1** and the **MK3** — both auto-detected at
+launch. Drives the device at 30 fps over SysEx with sources that range
 from a static test pattern up to a microphone-driven, beat-aware visual
 show with a browser-based control panel.
 
@@ -59,13 +60,15 @@ Dependencies: `mido`, `python-rtmidi`, `numpy`, `opencv-python`, `click`,
 ## Commands
 
 `list-ports` — show MIDI in/out ports and auto-detect the Launchpad Pro
-Standalone Port.
+(MK1 Standalone Port, or MK3 `LPProMK3 MIDI`). The auto-detect line
+prints which model was matched.
 
 `test --pattern <name>` — display a built-in pattern. Patterns:
 `bars`, `gradient`, `checker`, `flood` (with `--flood-color "#ff8000"`),
 `sweep`, `orientation`.
 
-`blackout` — every LED off, device returns to Note layout.
+`blackout` — every LED off; the device stays dark in Programmer Mode
+(so Live Mode's session view doesn't repaint over it).
 
 `run --source <webcam|file|test|audio|webcam-show>` — drive the display
 from a source. Notable flags:

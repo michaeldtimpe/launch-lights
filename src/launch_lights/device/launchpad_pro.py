@@ -174,16 +174,26 @@ class LaunchpadProOut:
         """Turn every LED off in one SysEx message (0Eh with palette index 0)."""
         self._send_sysex_inner((*HEADER, CMD_LIGHT_ALL, 0x00))
 
-    def close(self) -> None:
-        """Idempotent shutdown: blackout, exit programmer mode, close port.
+    def close(self, *, restore_mode: bool = True) -> None:
+        """Idempotent shutdown: blackout, optionally exit programmer mode,
+        close port.
 
         Tolerates repeated calls and partially-initialized state — SIGINT,
         signal handler, and atexit can all fire on the same instance.
+
+        ``restore_mode=False`` skips the exit-programmer step, leaving the
+        device dark in Programmer Mode — useful for the `blackout` CLI
+        command, where switching back to Live mode would immediately repaint
+        the grid.
         """
         if self._closed:
             return
         self._closed = True
-        for step in (self._safe_blackout, self._safe_exit_programmer, self._safe_close_port):
+        steps = [self._safe_blackout]
+        if restore_mode:
+            steps.append(self._safe_exit_programmer)
+        steps.append(self._safe_close_port)
+        for step in steps:
             try:
                 step()
             except Exception:  # noqa: BLE001

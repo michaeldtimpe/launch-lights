@@ -11,7 +11,11 @@ timing.
 .venv/bin/pip install -e ".[test]"
 ```
 
-Plug the Launchpad Pro into USB. It should enumerate as two MIDI ports.
+Plug the Launchpad Pro into USB. MK1 enumerates as two MIDI ports
+(`Standalone` and `Live`); MK3 enumerates as three (`LPProMK3 MIDI`,
+`LPProMK3 DIN`, `LPProMK3 DAW`). The MK3 needs stock Novation firmware —
+custom firmware that hides Programmer Mode from the Setup menu silently
+ignores all the lighting SysEx.
 
 ## Checklist
 
@@ -21,9 +25,13 @@ Plug the Launchpad Pro into USB. It should enumerate as two MIDI ports.
 .venv/bin/launch-lights list-ports
 ```
 
-Expect: two ports starting with `Launchpad Pro` — one ends in "Standalone"
-and one in "Live". The auto-detect line at the bottom should pick the
-Standalone one.
+Expect:
+
+- **MK1**: two ports — one ends in `Standalone`, one in `Live`. The
+  auto-detect line should pick the Standalone one and report `(mk1)`.
+- **MK3**: three ports — `LPProMK3 MIDI`, `LPProMK3 DIN`, `LPProMK3 DAW`.
+  Auto-detect picks the `MIDI` port and reports `(mk3)`. DAW and DIN
+  must NOT be selected (the lighting protocol doesn't work there).
 
 ### 2. Orientation
 
@@ -104,12 +112,13 @@ bottom rows dark for widescreen content.
 In any `run` or `test` session, press Ctrl-C. Expect:
 
 - Every LED goes off.
-- The device returns to Note layout (the user-facing default — the side
-  buttons regain their normal Live/Note/Drum/User/Session labels).
+- The device returns to its default user-facing mode (MK1: Note layout;
+  MK3: Live mode / Session view).
 - Stats line prints with `ticks`, `skips`, `max_drift`, and plan counts.
 
 Press Ctrl-C twice in quick succession to verify idempotent shutdown —
-`LaunchpadProOut.close()` should tolerate it without raising.
+both `LaunchpadProOut.close()` and `LaunchpadProMK3Out.close()` should
+tolerate it without raising.
 
 ### 8. Blackout recovery
 
@@ -119,7 +128,12 @@ If the device gets into a weird state (interrupted process, etc.):
 .venv/bin/launch-lights blackout
 ```
 
-Every pad should go off in a single SysEx message.
+Every pad should go off and the device should **stay dark** in
+Programmer Mode (it does NOT return to Live mode). On MK3 this matters
+because Live mode's session view would otherwise repaint the grid the
+instant we exit Programmer Mode. Run any `test` or `run` command to
+bring the device back; both restore the default user-facing mode on
+exit.
 
 ### 9. Audio show
 

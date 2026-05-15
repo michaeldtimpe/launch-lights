@@ -143,3 +143,12 @@ def test_close_blacks_out_and_restores_note_layout(dev):
     assert fake.sysex[0] == _sysex_inner(0x0E, 0x00)
     assert fake.sysex[1] == _sysex_inner(0x2C, 0x00)
     assert fake.closed is True
+
+
+def test_close_with_restore_mode_false_skips_exit_programmer(dev):
+    d, fake = dev
+    d.close(restore_mode=False)
+    # Should have sent ONLY the blackout, then closed the port — no
+    # layout-select back to Note (which would re-light the grid in Live mode).
+    assert fake.sysex == [_sysex_inner(0x0E, 0x00)]
+    assert fake.closed is True

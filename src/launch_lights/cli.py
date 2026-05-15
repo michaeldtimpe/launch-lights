@@ -23,11 +23,16 @@ from launch_lights.engine.plan import (
 )
 
 from launch_lights.device.launchpad_pro import LaunchpadProOut
+from launch_lights.device.launchpad_pro_mk3 import LaunchpadProMK3Out
 from launch_lights.device.midi_io import (
-    find_launchpad_pro_standalone_output,
+    Model,
+    classify_port,
+    detect_launchpad,
     list_input_ports,
     list_output_ports,
 )
+
+LaunchpadOut = LaunchpadProOut | LaunchpadProMK3Out
 from launch_lights.engine.renderer import Renderer
 from launch_lights.engine.scheduler import Scheduler
 from launch_lights.video.patterns import PATTERN_NAMES, build_pattern
@@ -61,20 +66,27 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _resolve_output_port(explicit: Optional[str]) -> str:
+def _resolve_device(explicit: Optional[str]) -> tuple[str, Model]:
+    """Pick a (port, model) pair from --port or auto-detection."""
     if explicit:
-        return explicit
-    found = find_launchpad_pro_standalone_output()
+        return explicit, classify_port(explicit)
+    found = detect_launchpad()
     if not found:
         console.print(
-            "[red]No Launchpad Pro Standalone Port found.[/red] "
+            "[red]No Launchpad Pro detected (MK1 or MK3).[/red] "
             "Connect the device or pass --port NAME (see `launch-lights list-ports`)."
         )
         sys.exit(2)
     return found
 
 
-def _install_shutdown(dev: LaunchpadProOut, renderer: Renderer | None = None) -> None:
+def _open_device(port_name: str, model: Model) -> LaunchpadOut:
+    if model == "mk3":
+        return LaunchpadProMK3Out(port_name)
+    return LaunchpadProOut(port_name)
+
+
+def _install_shutdown(dev: LaunchpadOut, renderer: Renderer | None = None) -> None:
     """Wire SIGINT/SIGTERM/atexit to a clean shutdown.
 
     LaunchpadProOut.close() is idempotent — repeated firing is safe."""
@@ -117,12 +129,13 @@ def list_ports() -> None:
         in_table.add_row(name)
     console.print(in_table)
 
-    found = find_launchpad_pro_standalone_output()
+    found = detect_launchpad()
     if found:
-        console.print(f"[green]Auto-detected:[/green] {found}")
+        port, model = found
+        console.print(f"[green]Auto-detected:[/green] {port} ([cyan]{model}[/cyan])")
     else:
         console.print(
-            "[yellow]No Launchpad Pro Standalone Port detected.[/yellow] "
+            "[yellow]No Launchpad Pro detected (MK1 or MK3).[/yellow] "
             "Connect the device, or pass --port NAME to other commands."
         )
 
@@ -130,15 +143,17 @@ def list_ports() -> None:
 @cli.command()
 @click.option("--port", default=None, help="MIDI output port name.")
 def blackout(port: Optional[str]) -> None:
-    """Turn every LED off and return the device to Note layout."""
-    port_name = _resolve_output_port(port)
-    dev = LaunchpadProOut(port_name)
+    """Turn every LED off and leave the device dark in Programmer Mode."""
+    port_name, model = _resolve_device(port)
+    dev = _open_device(port_name, model)
     try:
+        # Enter Programmer Mode so our cleared state isn't overwritten by
+        # Live Mode's session-view repaint.
+        dev.enter_programmer_mode()
         dev.blackout()
-        dev.exit_programmer_mode()
-        console.print("[green]Blackout sent.[/green]")
+        console.print(f"[green]Blackout sent.[/green] ({model})")
     finally:
-        dev.close()
+        dev.close(restore_mode=False)
 
 
 @cli.command()
@@ -155,8 +170,8 @@ def blackout(port: Optional[str]) -> None:
 @click.option("--port", default=None, help="MIDI output port name.")
 def test(pattern: str, duration: float, fps: float, flood_color: str, port: Optional[str]) -> None:
     """Display a test pattern on the Launchpad."""
-    port_name = _resolve_output_port(port)
-    dev = LaunchpadProOut(port_name)
+    port_name, model = _resolve_device(port)
+    dev = _open_device(port_name, model)
     renderer = Renderer(mode="rgb", prefer_full_frame=(pattern == "sweep"))
 
     _install_shutdown(dev, renderer)
@@ -253,7 +268,7 @@ def run(
     control_port: Optional[int],
 ) -> None:
     """Drive the Launchpad Pro from a webcam, video file, or test pattern."""
-    port_name = _resolve_output_port(port)
+    port_name, model = _resolve_device(port)
 
     if source == "file" and not file_path:
         console.print("[red]--file PATH is required when --source file[/red]")
@@ -262,7 +277,7 @@ def run(
     if full_frame is None:
         full_frame = source != "test"
 
-    dev = LaunchpadProOut(port_name)
+    dev = _open_device(port_name, model)
     palette: Optional[Palette] = None
     if color_mode == "palette":
         console.print("[dim]Building palette LUT...[/dim]")
